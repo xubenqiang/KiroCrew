@@ -592,7 +592,13 @@ def _url_payload_command(n: int) -> str:
 #: bare-secret pass: the closed ``_ELB_TARGET_GROUP_ARN_RE`` shape, its two span
 #: helpers, the lazy lookup in pass 3 that honours ``judged_sri_values``, and their
 #: comments; the exemption only narrows what pass 3 redacts.
-_PACKAGE_LINE_BUDGET = 32_970
+#: Raised by 63, from 32,970, for the ssh-to-self floor's glob program words: a glob
+#: that can name several ssh-family verbs is walked once per verb at its token
+#: (``_ssh_family_verbs``, ``_frame_verb_choices``, which also skips case patterns),
+#: nested payload verdicts are shared for one outer call
+#: (``_shares_nested_verdicts``), plus five manifest lines.
+#: The verdict stops depending on the hash seed.
+_PACKAGE_LINE_BUDGET = 33_033
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
