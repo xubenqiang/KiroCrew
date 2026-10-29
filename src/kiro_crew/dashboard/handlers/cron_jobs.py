@@ -23,7 +23,11 @@ from aiohttp import web
 from kiro_crew import model_registry
 from kiro_crew.cron import CronStoreBusy, CronStoreUnreadable, is_valid_timezone, parse_time_string
 from kiro_crew.cron_service.model import validate_auto_pause_after_failures
-from kiro_crew.dashboard.cron_inject import chat_folder_exists, move_cron_job_tab
+from kiro_crew.dashboard.cron_inject import (
+    chat_folder_exists,
+    chat_folder_refuses_store,
+    move_cron_job_tab,
+)
 from kiro_crew.dashboard.cron_timeout_field import timeout_secs_from_body
 from kiro_crew.dashboard.handlers._shared import require_owner_dashboard_request
 from kiro_crew.dashboard.handlers.cron_shared import (
@@ -33,6 +37,7 @@ from kiro_crew.dashboard.handlers.cron_shared import (
     _cron_unreadable_response,
     _invalid_path_id_response,
     _refuse_foreign_app_job,
+    _sel,
 )
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -346,6 +351,64 @@ def _unknown_chat_folder_response() -> web.Response:
     )
 
 
+def _refuse_mate_home_chat_folder(
+    request: web.Request,
+    state: DashboardState,
+    chat_folder_id: str,
+    memory_store: str,
+    operation: str,
+) -> web.Response | None:
+    """A 403 ``mate_home_locked`` when the job's tab could never be filed in *chat_folder_id*.
+
+    A mate's home and the folders inside it hold only that mate's sessions, and a
+    job's tab runs on the job's memory store: a job on any other store would be
+    saved with a folder its runs are never placed in. Refused here, while a
+    person is present to be told, and recorded like the routes' other denials.
+    """
+    if not chat_folder_id or not chat_folder_refuses_store(state, chat_folder_id, memory_store):
+        return None
+    app = _app_caller(request)
+    try:
+        _sel().log_api_access(
+            caller=f"app:{app}" if app else "dashboard",
+            operation=operation,
+            outcome="denied",
+            source="dashboard",
+            resources=f"chat_folder_id={chat_folder_id}",
+            error="mate_home_locked",
+        )
+    except Exception:  # pragma: no cover - audit must never change the outcome
+        logger.debug("SEL audit for %s failed", operation, exc_info=True)
+    return web.json_response(
+        {
+            "error": (
+                "That chat folder belongs to a mate, so this schedule's runs cannot be "
+                "filed there. Pick another folder, or choose not to file runs."
+            ),
+            "code": "mate_home_locked",
+        },
+        status=403,
+    )
+
+
+def _member_store(member_id: str) -> str:
+    """The memory store a schedule bound to *member_id* runs on, or ``""``. Blocking.
+
+    ``""`` (the person's) also for a member that does not resolve: the create
+    refuses that member anyway, and ``""`` is kept out of every mate's home.
+    """
+    if not member_id:
+        return ""
+    from kiro_crew.config.loader import KiroCrewConfig
+    from kiro_crew.execution_context import resolve_member_execution
+
+    try:
+        execution = resolve_member_execution(KiroCrewConfig.load(), member_id)
+    except Exception:
+        return ""
+    return execution.store.legacy_name
+
+
 class _ChatFolderGone(Exception):
     """The job's chat folder was deleted before the save could commit."""
 
@@ -527,6 +590,18 @@ async def api_crons_create(request: web.Request) -> web.Response:
     agent_id, member_id = await asyncio.to_thread(
         split_cron_agent_member, agent_id or "", member_id or ""
     )
+    # Kept out of a mate's home even as the person; the member is resolved only
+    # when the folder is in one.
+    if chat_folder_refuses_store(state, chat_folder_id, ""):
+        refused = _refuse_mate_home_chat_folder(
+            request,
+            state,
+            chat_folder_id,
+            await asyncio.to_thread(_member_store, member_id or ""),
+            "crons.create",
+        )
+        if refused is not None:
+            return refused
     add_kwargs: dict[str, Any] = {
         "channel": channel,
         "agent_id": (agent_id or ""),
@@ -819,6 +894,25 @@ async def api_cron_update(request: web.Request) -> web.Response:
         if chat_folder_err is not None:
             return chat_folder_err
         kwargs["chat_folder_id"] = resolved
+        if chat_folder_refuses_store(state, resolved, ""):
+            # In a mate's home. A schedule's member, and so its store, is fixed
+            # once created, so the store the job already runs on decides.
+            existing = await state.crons.get_job_async(job_id)
+            # An unreadable store loads as no job, which would skip the refusal.
+            try:
+                state.crons.raise_if_store_unreadable()
+            except CronStoreUnreadable as exc:
+                return _cron_unreadable_response(exc)
+            if existing is not None:
+                refused = _refuse_mate_home_chat_folder(
+                    request,
+                    state,
+                    resolved,
+                    str(getattr(existing, "memory_store", "") or ""),
+                    "crons.update",
+                )
+                if refused is not None:
+                    return refused
     if "chat_folder_id" in kwargs or "persistent_session" in kwargs:
         # Turning persistence off clears a filed job's folder in the store, so
         # that edit moves the tab through the same path an explicit clear does.

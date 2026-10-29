@@ -406,6 +406,20 @@ def chat_folder_exists(state: DashboardState, folder_id: str) -> bool:
     return any(str(f.get("id")) == folder_id for f in getattr(state, "_folders", None) or ())
 
 
+def chat_folder_refuses_store(state: DashboardState, folder_id: str, memory_store: str) -> bool:
+    """Whether a tab on *memory_store* may NOT be filed in *folder_id*.
+
+    A job's tab runs on the job's memory store, and a mate's home (and every
+    folder inside it) holds only that mate's sessions: a tab on any other store,
+    the person's included, is kept out. The save routes refuse such a folder
+    and the placement below re-checks it at run time.
+    """
+    from kiro_crew.dashboard.mate_folders import mate_principal, refuses_write_into
+
+    folders = getattr(state, "_folders", None) or []
+    return refuses_write_into(folders, folder_id, mate_principal(memory_store))
+
+
 def chat_folder_for_minted_tab(state: DashboardState, job: "CronJob") -> str:
     """The chat folder a JUST-MINTED ``cron-{id}`` tab belongs in, or ``""``.
 
@@ -471,6 +485,23 @@ async def _commit_cron_tab_placement(
     """
     from kiro_crew.dashboard.chat_folders import _slot_meta_txn_lock
     from kiro_crew.dashboard.chat_utils import slot_history_key
+
+    # A mate's home holds only that mate's sessions: a job's tab runs on the
+    # job's store, so it is filed there only when that store is the mate's.
+    if chat_folder_refuses_store(state, placed, str(getattr(slot, "memory_store", "") or "")):
+        logger.info("Cron '%s': chat folder %s is a mate's; tab not moved", job.name, placed)
+        try:
+            sel().log_api_access(
+                caller=f"cron:{job.id}",
+                operation="cron.chat_folder_placement",
+                outcome="denied",
+                source="cron",
+                resources=f"job={job.id},slot={slot.key},chat_folder_id={placed}",
+                error="mate_home_locked",
+            )
+        except Exception:
+            logger.debug("SEL logging failed for a refused cron tab placement", exc_info=True)
+        return False
 
     async with _slot_meta_txn_lock(state):
         slot.folder_id = placed

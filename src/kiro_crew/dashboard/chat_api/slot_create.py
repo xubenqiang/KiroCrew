@@ -283,6 +283,17 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     # or two and it then jumps into the folder. Validated exactly as
     # PATCH /api/chat/slots/{slot}/folder validates it.
     folder_id = str(body.get("folder_id") or "")
+    from kiro_crew.dashboard.mate_folders import home_owner_of
+
+    if home_owner_of(state._folders, folder_id):
+        # A mate's home folder holds only the chats that mate opens.
+        return web.json_response(
+            {
+                "error": "this folder belongs to a mate and is managed for you",
+                "code": "mate_home_locked",
+            },
+            status=403,
+        )
     if folder_id and not any(f["id"] == folder_id for f in state._folders):
         return web.json_response(
             {"error": "folder not found", "code": "folder_not_found"}, status=400
